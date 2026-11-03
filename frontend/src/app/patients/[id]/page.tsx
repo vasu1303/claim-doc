@@ -1,274 +1,143 @@
 'use client'
-import { useEffect, useState, useRef } from 'react'
-import AppShell from '@/components/AppShell'
-import api, { type Patient, type Document as Doc, type Query, type Message } from '@/lib/api'
-import { Badge } from '@/components/ui/badge'
-import { getStatusColor, formatDate, formatDateTime, formatFileSize, getDocTypeLabel } from '@/lib/utils'
-import { ChevronLeft, Upload, FileText, MessageSquare, User, Loader2, CheckCircle, XCircle, Clock, AlertCircle, X } from 'lucide-react'
+import { useState } from 'react'
+import { useParams } from 'next/navigation'
 import Link from 'next/link'
 import toast from 'react-hot-toast'
+import AppShell, { useSession } from '@/components/AppShell'
+import { Empty, ErrorBox, Field, Loading, MessageCards, PageHeader, QueryList, Status } from '@/components/Portal'
+import api, { DOC_TYPES, downloadFile, errorMessage, type Patient, type Document, type Query, type Message, type User } from '@/lib/api'
+import { useResource } from '@/lib/hooks'
+import { formatDate, formatFileSize, getDocTypeLabel } from '@/lib/utils'
 
-const DOC_TYPES = [
-  'discharge_summary', 'hospital_bill', 'consultation_notes', 'lab_report',
-  'prescription', 'policy_copy', 'kyc_document', 'claim_form',
-  'previous_medical_history', 'authorization_letter', 'id_proof',
-]
+function Assignments({ patientId }: { patientId: string }) {
+  const users = useResource<User[]>('/api/users')
+  const assigned = useResource<string[]>(`/api/patients/${patientId}/assignments`)
+  const [selected, setSelected] = useState<string[] | null>(null)
+  const [busy, setBusy] = useState(false)
+  const ids = selected || assigned.data || []
+  async function save() {
+    setBusy(true)
+    try { await api.put(`/api/patients/${patientId}/assignments`, { user_ids: ids }); await assigned.refresh(); setSelected(null); toast.success('Access updated') }
+    catch (e) { toast.error(errorMessage(e)) }
+    finally { setBusy(false) }
+  }
+  return <section className="card mt-5"><h2 className="mb-2 font-semibold">Staff access</h2><p className="mb-3 text-xs text-slate-500">Only assigned staff, administrators, and the linked patient account can access this locker.</p>
+    <ErrorBox message={users.error || assigned.error} />
+    {users.data?.filter(u => u.role === 'staff' && u.active).map(u => <label key={u.id} className="mr-5 inline-flex items-center gap-2 text-sm">
+      <input type="checkbox" checked={ids.includes(u.id)} onChange={e => setSelected(e.target.checked ? [...ids, u.id] : ids.filter(id => id !== u.id))} />{u.name}</label>)}
+    {users.data && !users.data.some(u => u.role === 'staff' && u.active) && <p className="mb-3 text-sm text-slate-400">Create staff accounts under Accounts & access first.</p>}
+    <button className="btn-secondary mt-3 block" disabled={busy || assigned.loading || !!assigned.error} onClick={save}>{busy ? 'Saving…' : 'Save staff access'}</button>
+  </section>
+}
 
-export default function PatientDetailPage({ params }: { params: { id: string } }) {
-  const [patient, setPatient] = useState<Patient | null>(null)
-  const [docs, setDocs] = useState<Doc[]>([])
-  const [queries, setQueries] = useState<Query[]>([])
-  const [messages, setMessages] = useState<Message[]>([])
+function PatientLocker({ id }: { id: string }) {
+  const user = useSession()
+  const patient = useResource<Patient>(`/api/patients/${id}`, 5000)
+  const docs = useResource<Document[]>(`/api/patients/${id}/documents`, 4000)
+  const queries = useResource<Query[]>(`/api/patients/${id}/queries`, 4000)
+  const messages = useResource<Message[]>(`/api/messages/patient/${id}`, 4000)
   const [tab, setTab] = useState<'overview' | 'documents' | 'queries' | 'messages'>('overview')
-  const [loading, setLoading] = useState(true)
-  const docRef = useRef<HTMLInputElement>(null)
-  const queryRef = useRef<HTMLInputElement>(null)
   const [docType, setDocType] = useState('discharge_summary')
   const [uploading, setUploading] = useState(false)
-  const [uploadingQuery, setUploadingQuery] = useState(false)
-
-  const load = async () => {
-    try {
-      const [pRes, dRes, qRes, mRes] = await Promise.all([
-        api.get(`/api/patients/${params.id}`),
-        api.get(`/api/patients/${params.id}/documents`),
-        api.get(`/api/patients/${params.id}/queries`),
-        api.get(`/api/messages/patient/${params.id}`),
-      ])
-      setPatient(pRes.data)
-      setDocs(dRes.data)
-      setQueries(qRes.data)
-      setMessages(mRes.data)
-    } catch (e) { console.error(e) }
-    finally { setLoading(false) }
-  }
-
-  useEffect(() => { load() }, [params.id])
-
-  const handleDocUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
+  const [editing, setEditing] = useState(false)
+  const [form, setForm] = useState({ name: '', phone: '', email: '', dob: '', gender: '', policy_number: '', insurer_name: '', notes: '', claim_status: '' })
+  const [saving, setSaving] = useState(false)
+  async function upload(event: React.ChangeEvent<HTMLInputElement>, query: boolean) {
+    const file = event.target.files?.[0]
+    const input = event.target
     if (!file) return
+    if (file.size > 20 * 1024 * 1024) { toast.error('Files must be 20 MB or smaller.'); input.value = ''; return }
     setUploading(true)
-    const fd = new FormData()
-    fd.append('file', file)
-    fd.append('doc_type', docType)
     try {
-      await api.post(`/api/patients/${params.id}/documents`, fd)
-      toast.success('Document uploaded')
-      const dRes = await api.get(`/api/patients/${params.id}/documents`)
-      setDocs(dRes.data)
-    } catch (err: any) { toast.error(err.response?.data?.error || 'Upload failed') }
-    finally { setUploading(false); e.target.value = '' }
+      const body = new FormData()
+      body.append('file', file)
+      if (!query) body.append('doc_type', docType)
+      const result = await api.post<{ id: string }>(`/api/patients/${id}/${query ? 'queries' : 'documents'}`, body)
+      toast.success(query ? 'Letter queued. Analysis and both notification channels run automatically.' : 'Document uploaded. Existing queries will be checked again after indexing.')
+      if (query) { setTab('queries'); await queries.refresh() }
+      else { await docs.refresh(); setTab('documents') }
+      return result
+    } catch (e) { toast.error(errorMessage(e)) }
+    finally { setUploading(false); input.value = '' }
   }
-
-  const handleQueryUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setUploadingQuery(true)
-    const fd = new FormData()
-    fd.append('file', file)
-    try {
-      const res = await api.post(`/api/patients/${params.id}/queries`, fd)
-      toast.success('Query letter uploaded – AI processing started 🤖')
-      const qRes = await api.get(`/api/patients/${params.id}/queries`)
-      setQueries(qRes.data)
-    } catch (err: any) { toast.error(err.response?.data?.error || 'Upload failed') }
-    finally { setUploadingQuery(false); e.target.value = '' }
+  async function download(url: string, name: string) {
+    try { await downloadFile(url, name) } catch (e) { toast.error(errorMessage(e)) }
   }
-
-  if (loading) return <AppShell><div className="flex items-center justify-center h-64"><Loader2 className="animate-spin text-brand-500" size={32} /></div></AppShell>
-  if (!patient) return <AppShell><p className="text-slate-500">Patient not found.</p></AppShell>
-
-  return (
-    <AppShell>
-      <div className="max-w-5xl">
-        {/* Back */}
-        <Link href="/patients" className="inline-flex items-center gap-1.5 text-slate-500 hover:text-slate-700 text-sm mb-5">
-          <ChevronLeft size={16} /> Patients
-        </Link>
-
-        {/* Patient header */}
-        <div className="bg-white rounded-2xl card-shadow p-6 mb-5 flex items-start justify-between">
-          <div className="flex items-start gap-4">
-            <div className="w-14 h-14 rounded-2xl bg-brand-100 flex items-center justify-center text-brand-700 font-bold text-xl flex-shrink-0">
-              {patient.name[0]}
-            </div>
-            <div>
-              <h1 className="text-xl font-bold text-slate-900">{patient.name}</h1>
-              <p className="text-slate-400 text-sm mt-0.5">{patient.patient_id} · {patient.email} · {patient.phone}</p>
-              <div className="flex items-center gap-2 mt-2">
-                <Badge variant={getStatusColor(patient.claim_status) as any}>
-                  {patient.claim_status.replace(/_/g, ' ')}
-                </Badge>
-                {patient.insurer_name && <span className="text-xs text-slate-400">{patient.insurer_name}</span>}
-                {patient.policy_number && <span className="text-xs text-slate-400">· {patient.policy_number}</span>}
-              </div>
-            </div>
-          </div>
-          <div className="flex gap-3 flex-shrink-0">
-            <div className="text-center">
-              <p className="text-lg font-bold text-slate-900">{docs.length}</p>
-              <p className="text-xs text-slate-400">Docs</p>
-            </div>
-            <div className="text-center">
-              <p className="text-lg font-bold text-slate-900">{queries.length}</p>
-              <p className="text-xs text-slate-400">Queries</p>
-            </div>
-            <div className="text-center">
-              <p className="text-lg font-bold text-slate-900">{messages.length}</p>
-              <p className="text-xs text-slate-400">Messages</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Tabs */}
-        <div className="flex gap-1 bg-slate-100 p-1 rounded-xl mb-5 w-fit">
-          {(['overview', 'documents', 'queries', 'messages'] as const).map(t => (
-            <button key={t} onClick={() => setTab(t)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                tab === t ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-              }`}>
-              {t.charAt(0).toUpperCase() + t.slice(1)}
-              {t === 'documents' && <span className="ml-1.5 text-xs font-normal text-slate-400">({docs.length})</span>}
-              {t === 'queries' && <span className="ml-1.5 text-xs font-normal text-slate-400">({queries.length})</span>}
-              {t === 'messages' && <span className="ml-1.5 text-xs font-normal text-slate-400">({messages.length})</span>}
-            </button>
-          ))}
-        </div>
-
-        {/* Tab content */}
-        {tab === 'overview' && (
-          <div className="grid grid-cols-2 gap-4">
-            <div className="bg-white rounded-2xl card-shadow p-5">
-              <h3 className="font-semibold text-slate-900 mb-4 flex items-center gap-2"><User size={16} className="text-brand-500" /> Patient Info</h3>
-              <dl className="space-y-3">
-                {[['Name', patient.name], ['DOB', patient.dob ? formatDate(patient.dob) : '—'], ['Gender', patient.gender || '—'], ['Phone', patient.phone || '—'], ['Email', patient.email || '—']].map(([k, v]) => (
-                  <div key={k} className="flex justify-between text-sm">
-                    <dt className="text-slate-400">{k}</dt>
-                    <dd className="font-medium text-slate-700">{v}</dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-            <div className="bg-white rounded-2xl card-shadow p-5">
-              <h3 className="font-semibold text-slate-900 mb-4 flex items-center gap-2"><FileText size={16} className="text-brand-500" /> Claim Info</h3>
-              <dl className="space-y-3">
-                {[['Policy No.', patient.policy_number || '—'], ['Insurer', patient.insurer_name || '—'], ['Status', patient.claim_status.replace(/_/g, ' ')], ['Added', formatDate(patient.created_at)]].map(([k, v]) => (
-                  <div key={k} className="flex justify-between text-sm">
-                    <dt className="text-slate-400">{k}</dt>
-                    <dd className="font-medium text-slate-700">{v}</dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-          </div>
-        )}
-
-        {tab === 'documents' && (
-          <div>
-            <div className="flex items-center gap-3 mb-4">
-              <select value={docType} onChange={e => setDocType(e.target.value)}
-                className="border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-brand-400 bg-white">
-                {DOC_TYPES.map(t => <option key={t} value={t}>{getDocTypeLabel(t)}</option>)}
-              </select>
-              <input ref={docRef} type="file" className="hidden" onChange={handleDocUpload} accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" />
-              <button onClick={() => docRef.current?.click()} disabled={uploading}
-                className="flex items-center gap-2 bg-brand-500 hover:bg-brand-600 text-white px-4 py-2 rounded-xl text-sm font-semibold transition-colors disabled:opacity-50">
-                {uploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
-                {uploading ? 'Uploading...' : 'Upload Document'}
-              </button>
-            </div>
-            {docs.length === 0 ? (
-              <div className="text-center py-16 text-slate-400">
-                <FileText size={36} className="mx-auto mb-2 text-slate-200" />
-                No documents yet
-              </div>
-            ) : (
-              <div className="grid grid-cols-2 gap-3">
-                {docs.map(d => (
-                  <div key={d.id} className="bg-white rounded-xl card-shadow p-4 flex items-start gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-brand-50 flex items-center justify-center flex-shrink-0">
-                      <FileText size={18} className="text-brand-500" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-slate-900 text-sm truncate">{d.original_name}</p>
-                      <p className="text-xs text-slate-400 mt-0.5">{getDocTypeLabel(d.doc_type)} · {formatDate(d.created_at)}</p>
-                      {d.file_size && <p className="text-xs text-slate-300 mt-0.5">{formatFileSize(d.file_size)}</p>}
-                    </div>
-                    <Badge variant="success" className="flex-shrink-0">Available</Badge>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {tab === 'queries' && (
-          <div>
-            <div className="flex items-center gap-3 mb-4">
-              <input ref={queryRef} type="file" className="hidden" onChange={handleQueryUpload} accept=".pdf,.jpg,.jpeg,.png" />
-              <button onClick={() => queryRef.current?.click()} disabled={uploadingQuery}
-                className="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2 rounded-xl text-sm font-semibold transition-colors disabled:opacity-50">
-                {uploadingQuery ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
-                {uploadingQuery ? 'Processing...' : 'Upload Query Letter'}
-              </button>
-              <p className="text-xs text-slate-400">AI will automatically process and send patient message</p>
-            </div>
-            {queries.length === 0 ? (
-              <div className="text-center py-16 text-slate-400">
-                <FileText size={36} className="mx-auto mb-2 text-slate-200" />
-                No query letters yet
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {queries.map(q => (
-                  <Link key={q.id} href={`/queries/${q.id}`}
-                    className="block bg-white rounded-xl card-shadow p-5 hover:card-shadow-hover transition-shadow">
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <p className="font-medium text-slate-900 text-sm">{q.file_name}</p>
-                        <p className="text-xs text-slate-400 mt-1">{q.insurer_name || patient.insurer_name} · Received {formatDate(q.created_at)}</p>
-                      </div>
-                      <Badge variant={getStatusColor(q.status) as any}>{q.status}</Badge>
-                    </div>
-                    {q.processed_at && <p className="text-xs text-slate-300 mt-2">Processed: {formatDateTime(q.processed_at)}</p>}
-                  </Link>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {tab === 'messages' && (
-          <div className="space-y-3">
-            {messages.length === 0 ? (
-              <div className="text-center py-16 text-slate-400">
-                <MessageSquare size={36} className="mx-auto mb-2 text-slate-200" />
-                No messages sent yet
-              </div>
-            ) : messages.map(m => (
-              <div key={m.id} className="bg-white rounded-xl card-shadow p-5">
-                <div className="flex items-center justify-between mb-3">
-                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Sent {formatDateTime(m.sent_at || m.created_at)}</p>
-                  <div className="flex gap-2">
-                    <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium ${
-                      m.whatsapp_status === 'sent' || m.whatsapp_status === 'mock_sent' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
-                    }`}>
-                      WhatsApp: {m.whatsapp_status}
-                    </span>
-                    <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium ${
-                      m.email_status === 'sent' || m.email_status === 'mock_sent' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
-                    }`}>
-                      Email: {m.email_status}
-                    </span>
-                  </div>
-                </div>
-                <pre className="text-sm text-slate-700 whitespace-pre-wrap font-sans leading-relaxed bg-slate-50 rounded-xl p-4 border border-slate-100">{m.message_body}</pre>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </AppShell>
-  )
+  async function retryDocument(document: Document) {
+    try { await api.post(`/api/patients/${id}/documents/${document.id}/retry`); await docs.refresh(); toast.success('Indexing queued again') }
+    catch (e) { toast.error(errorMessage(e)) }
+  }
+  async function removeDocument(document: Document) {
+    if (!window.confirm(`Permanently remove ${document.original_name}? Existing queries will be checked again.`)) return
+    try { await api.delete(`/api/patients/${id}/documents/${document.id}`); await docs.refresh(); toast.success('Document removed') }
+    catch (e) { toast.error(errorMessage(e)) }
+  }
+  function edit(p: Patient) {
+    setForm({ name: p.name, phone: p.phone || '', email: p.email || '', dob: p.dob?.slice(0, 10) || '', gender: p.gender || '',
+      policy_number: p.policy_number || '', insurer_name: p.insurer_name || '', notes: p.notes || '', claim_status: p.claim_status })
+    setEditing(true)
+  }
+  async function save(event: React.FormEvent) {
+    event.preventDefault(); setSaving(true)
+    try { await api.patch(`/api/patients/${id}`, form); await patient.refresh(); setEditing(false); toast.success('Profile updated') }
+    catch (e) { toast.error(errorMessage(e)) }
+    finally { setSaving(false) }
+  }
+  if (patient.loading) return <Loading />
+  if (!patient.data) return <ErrorBox message={patient.error || 'Patient not found.'} retry={patient.refresh} />
+  const p = patient.data
+  return <>
+    <Link href="/patients" className="mb-4 inline-block text-sm text-brand-700">← Patient lockers</Link>
+    <PageHeader title={p.name} description={`${p.patient_id} · ${p.insurer_name || 'No insurer yet'}${p.is_synthetic ? ' · SYNTHETIC' : ''}`}>
+      <div className="flex items-center gap-3"><Status value={p.claim_status} />{user?.role !== 'patient' && <button className="btn-secondary" onClick={() => edit(p)}>Edit profile</button>}</div>
+    </PageHeader>
+    <div className="mb-5 flex flex-wrap gap-2">{(['overview', 'documents', 'queries', 'messages'] as const).map(t =>
+      <button key={t} className={tab === t ? 'btn' : 'btn-secondary'} onClick={() => setTab(t)}>{t[0].toUpperCase() + t.slice(1)}
+        {t === 'documents' ? ` (${docs.data?.length || 0})` : t === 'queries' ? ` (${queries.data?.length || 0})` : t === 'messages' ? ` (${messages.data?.length || 0})` : ''}</button>)}</div>
+    <ErrorBox message={patient.error || docs.error || queries.error || messages.error} />
+    {tab === 'overview' && <>
+      <div className="grid gap-4 sm:grid-cols-2"><section className="card"><h2 className="mb-4 font-semibold">Patient profile</h2><dl className="space-y-3">
+        {[['Email', p.email], ['Phone', p.phone], ['Date of birth', p.dob ? formatDate(p.dob) : ''], ['Gender', p.gender], ['Policy number', p.policy_number], ['Insurer', p.insurer_name]].map(([label, value]) =>
+          <div className="flex justify-between gap-3 text-sm" key={label}><dt className="text-slate-500">{label}</dt><dd className="break-all font-medium">{value || '—'}</dd></div>)}</dl></section>
+        <section className="card"><h2 className="mb-4 font-semibold">How your locker works</h2><ol className="list-inside list-decimal space-y-3 text-sm text-slate-600">
+          <li>Upload supporting documents using the correct document category.</li><li>Staff upload insurer query letters to this locker.</li>
+          <li>The system identifies requests and checks existing documents automatically.</li><li>Missing items and clarifications are sent by WhatsApp and email. Check message history for actual channel outcomes.</li>
+        </ol>{p.notes && <p className="mt-4 whitespace-pre-wrap border-t pt-3 text-sm text-slate-500">{p.notes}</p>}</section></div>
+      {user?.role === 'admin' && <Assignments patientId={id} />}
+    </>}
+    {tab === 'documents' && <>
+      <div className="card mb-5 flex flex-wrap items-end gap-3"><label className="text-sm font-medium">Document category<select className="input mt-1" value={docType} onChange={e => setDocType(e.target.value)}>
+        {DOC_TYPES.map(t => <option value={t} key={t}>{getDocTypeLabel(t)}</option>)}</select></label>
+        <label className={`btn cursor-pointer ${uploading ? 'opacity-50' : ''}`}>{uploading ? 'Uploading…' : '+ Upload document'}
+          <input aria-label="Upload supporting document" type="file" className="sr-only" accept=".pdf,.png,.jpg,.jpeg,.txt" disabled={uploading} onChange={e => upload(e, false)} /></label>
+        <p className="text-xs text-slate-400">PDF, PNG, JPEG, or UTF-8 text · up to 20 MB</p></div>
+      {docs.loading ? <Loading /> : !docs.data?.length ? <Empty>No documents yet.</Empty> : <div className="grid gap-3 sm:grid-cols-2">{docs.data.map(d => <article className="card" key={d.id}>
+        <div className="flex items-start justify-between gap-2"><h3 className="break-all font-semibold">{d.original_name}</h3><Status value={d.extraction_status} /></div>
+        <p className="my-3 text-sm text-slate-500">{getDocTypeLabel(d.doc_type)} · {formatFileSize(d.file_size)} · {formatDate(d.created_at)}</p>
+        {d.extraction_status === 'failed' && <div className="mb-2 text-xs text-red-700"><p>This document could not be indexed. Check the analysis service, then retry, or ask staff to remove it and upload a readable replacement.</p>
+          <button className="mt-2 underline" onClick={() => retryDocument(d)}>Retry indexing</button></div>}
+        <button className="text-sm text-brand-700 hover:underline" onClick={() => download(`/api/patients/${id}/documents/${d.id}/download`, d.original_name)}>Download private file</button>
+        {user?.role !== 'patient' && <button className="ml-4 text-xs text-red-700 hover:underline" onClick={() => removeDocument(d)}>Remove</button>}
+      </article>)}</div>}
+    </>}
+    {tab === 'queries' && <>
+      {user?.role !== 'patient' && <div className="card mb-5"><label className={`btn cursor-pointer ${uploading ? 'opacity-50' : ''}`}>{uploading ? 'Uploading…' : '+ Upload insurer query letter'}
+        <input aria-label="Upload insurer query letter" type="file" className="sr-only" accept=".pdf,.png,.jpg,.jpeg,.txt" disabled={uploading} onChange={e => upload(e, true)} /></label>
+        <p className="mt-3 text-xs text-slate-500">Uploading starts analysis and both notification channels without another click. This screen updates automatically.</p></div>}
+      {queries.loading ? <Loading /> : <QueryList queries={queries.data || []} />}
+    </>}
+    {tab === 'messages' && (messages.loading ? <Loading /> : <MessageCards messages={messages.data || []} />)}
+    {editing && <div role="dialog" aria-modal="true" aria-label="Edit patient" className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/50 p-4">
+      <form className="my-auto w-full max-w-2xl rounded-2xl bg-white p-6" onSubmit={save}><h2 className="mb-5 text-xl font-bold">Edit patient</h2>
+        <div className="grid gap-3 sm:grid-cols-2">{([
+          ['name', 'Full name', 'text'], ['phone', 'Phone', 'tel'], ['email', 'Email', 'email'], ['dob', 'Date of birth', 'date'],
+          ['gender', 'Gender', 'text'], ['policy_number', 'Policy number', 'text'], ['insurer_name', 'Insurer', 'text'],
+        ] as const).map(([key, label, type]) => <Field label={label} key={key} type={type} required={key === 'name'} value={form[key]} onChange={e => setForm({ ...form, [key]: e.target.value })} />)}
+          <label className="text-sm font-medium">Claim status<select className="input mt-1" value={form.claim_status} onChange={e => setForm({ ...form, claim_status: e.target.value })}>
+            {['pending', 'processing', 'awaiting_documents', 'completed'].map(s => <option key={s}>{s}</option>)}</select></label></div>
+        <label className="mt-3 block text-sm font-medium">Notes<textarea className="input mt-1" value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} maxLength={5000} /></label>
+        <div className="mt-5 flex justify-end gap-3"><button className="btn-secondary" type="button" onClick={() => setEditing(false)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Saving…' : 'Save profile'}</button></div>
+      </form></div>}
+  </>
 }
+export default function PatientPage() { const params = useParams<{ id: string }>(); return <AppShell><PatientLocker id={params.id} /></AppShell> }

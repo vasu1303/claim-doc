@@ -1,0 +1,15 @@
+{
+  "name": "patient-locker",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": ["backend", "frontend", "messenger"],
+  "scripts": {
+    "setup": "node scripts/setup.js",
+    "dev": "node scripts/dev.js",
+    "seed": "npm run seed --workspace backend",
+    "test": "npm test --workspace backend && npm test --workspace messenger",
+    "test:ai": "ai_service\\.venv\\Scripts\\python.exe -m unittest discover -s ai_service\\tests -v",
+    "build": "npm run build --workspace frontend"
+  },
+  "engines": { "node": ">=20.19.0" }
+}

@@ -1,31 +1,10 @@
 export function getToken(): string | null {
-  if (typeof window === 'undefined') return null
-  return localStorage.getItem('token')
+  return typeof window === 'undefined' ? null : sessionStorage.getItem('locker-token')
 }
-
-export function setToken(token: string) {
-  localStorage.setItem('token', token)
-}
-
+export function setToken(token: string) { sessionStorage.setItem('locker-token', token) }
 export function removeToken() {
+  if (typeof window === 'undefined') return
+  sessionStorage.removeItem('locker-token')
   localStorage.removeItem('token')
   localStorage.removeItem('user')
-}
-
-export function getUser() {
-  if (typeof window === 'undefined') return null
-  try {
-    const u = localStorage.getItem('user')
-    return u ? JSON.parse(u) : null
-  } catch {
-    return null
-  }
-}
-
-export function setUser(user: object) {
-  localStorage.setItem('user', JSON.stringify(user))
-}
-
-export function isAuthenticated(): boolean {
-  return !!getToken()
 }

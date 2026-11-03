@@ -1,0 +1,9 @@
+SYNTHETIC DEMO QUERY - NOT A REAL INSURER LETTER
+Dear Claims Team,
+Please provide the following information to assess this fictional claim:
+1. Please provide the discharge summary.
+2. Please provide the hospital bill.
+3. Please provide the policy copy.
+4. Explain the reason for the delay in notifying the insurer.
+Regards,
+Synthetic Test Insurance

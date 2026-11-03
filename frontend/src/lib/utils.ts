@@ -22,13 +22,13 @@ export function formatFileSize(bytes: number | null | undefined): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-export function getStatusColor(status: string): string {
+export function getStatusColor(status: string): 'success' | 'info' | 'warning' | 'danger' | 'secondary' {
   switch (status?.toLowerCase()) {
     case 'completed': case 'sent': case 'available': case 'mock_sent': return 'success'
-    case 'processing': case 'queued': return 'info'
+    case 'processing': case 'queued': case 'sending': return 'info'
     case 'pending': case 'awaiting_documents': return 'warning'
-    case 'failed': case 'missing': return 'danger'
-    case 'clarification_needed': return 'warning'
+    case 'failed': case 'missing': case 'unknown': return 'danger'
+    case 'clarification_needed': case 'needs_review': case 'retrying': return 'warning'
     default: return 'secondary'
   }
 }

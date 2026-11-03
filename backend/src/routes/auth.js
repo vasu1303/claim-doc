@@ -1,43 +1,37 @@
 const router = require('express').Router();
-const pool = require('../db/pool');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { rateLimit } = require('express-rate-limit');
+const pool = require('../db/pool');
+const config = require('../config');
+const { authenticate, publicUser, audit } = require('../middleware/auth');
+const { asyncRoute, parse, z, HttpError } = require('../http');
 
-// POST /api/auth/register
-router.post('/register', async (req, res) => {
-  try {
-    const { name, email, password, role = 'staff' } = req.body;
-    if (!name || !email || !password) return res.status(400).json({ error: 'Missing fields' });
-    const hash = await bcrypt.hash(password, 10);
-    const result = await pool.query(
-      'INSERT INTO users (name, email, password_hash, role) VALUES ($1,$2,$3,$4) RETURNING id, name, email, role',
-      [name, email, hash, role]
-    );
-    const user = result.rows[0];
-    const token = jwt.sign({ id: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.json({ user, token });
-  } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'Email already exists' });
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// POST /api/auth/login
-router.post('/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    const result = await pool.query('SELECT * FROM users WHERE email=$1', [email]);
-    const user = result.rows[0];
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
-    const token = jwt.sign({ id: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.json({ user: { id: user.id, name: user.name, email: user.email, role: user.role }, token });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
+router.post('/login', rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false,
+  message: { error: 'Too many sign-in attempts. Try again in 15 minutes.' } }), asyncRoute(async (req, res) => {
+  const { email, password } = parse(z.object({ email: z.string().email().transform((s) => s.toLowerCase()), password: z.string().min(1).max(128) }), req.body);
+  const { rows } = await pool.query('SELECT * FROM users WHERE LOWER(email)=$1 AND active=TRUE', [email]);
+  const user = rows[0];
+  const dummyHash = '$2b$10$qVLj/OYyYn2A1GFQQ4Lr3.P.0BG/qK.HtriPDx7N.cYVNQfWGolby';
+  const valid = await bcrypt.compare(password, user?.password_hash || dummyHash);
+  if (!user || !valid) throw new HttpError(401, 'Invalid email or password.');
+  const token = jwt.sign({ version: user.token_version }, config.jwtSecret, {
+    subject: user.id, issuer: 'patient-locker', expiresIn: '8h', algorithm: 'HS256',
+  });
+  await audit(user.id, 'login');
+  res.json({ token, user: publicUser(user) });
+}));
+router.get('/me', authenticate, (req, res) => res.json(req.user));
+router.post('/logout', authenticate, asyncRoute(async (req, res) => {
+  await pool.query('UPDATE users SET token_version=token_version+1 WHERE id=$1', [req.user.id]);
+  res.json({ ok: true });
+}));
+router.post('/password', authenticate, asyncRoute(async (req, res) => {
+  const input = parse(z.object({ current_password: z.string().min(1), password: z.string().min(12).max(128) }), req.body);
+  const { rows } = await pool.query('SELECT password_hash FROM users WHERE id=$1', [req.user.id]);
+  if (!await bcrypt.compare(input.current_password, rows[0].password_hash)) throw new HttpError(400, 'Current password is incorrect.');
+  await pool.query('UPDATE users SET password_hash=$1,token_version=token_version+1 WHERE id=$2', [await bcrypt.hash(input.password, 12), req.user.id]);
+  await audit(req.user.id, 'password_changed');
+  res.json({ ok: true, message: 'Password changed. Please sign in again.' });
+}));
 module.exports = router;

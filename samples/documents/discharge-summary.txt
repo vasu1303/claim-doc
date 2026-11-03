@@ -1,0 +1,8 @@
+SYNTHETIC DEMO DOCUMENT - NOT A REAL PATIENT RECORD
+Discharge Summary
+Hospital: Example Demonstration Hospital
+Admission: 2026-01-02
+Discharge: 2026-01-05
+Treatment: Fictional inpatient observation.
+Condition at discharge: Stable.
+This generic fixture intentionally contains no real patient information.

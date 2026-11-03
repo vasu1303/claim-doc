@@ -1,102 +1,77 @@
 const router = require('express').Router();
 const pool = require('../db/pool');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, roles, scope, patientAccess, audit } = require('../middleware/auth');
+const { asyncRoute, parse, z, uuid, HttpError } = require('../http');
 
-// GET /api/patients
-router.get('/', authenticate, async (req, res) => {
-  try {
-    const { search, status, page = 1, limit = 20 } = req.query;
-    let query = `
-      SELECT p.*,
-        (SELECT COUNT(*) FROM documents d WHERE d.patient_id = p.id) AS doc_count,
-        (SELECT COUNT(*) FROM queries q WHERE q.patient_id = p.id) AS query_count,
-        (SELECT COUNT(*) FROM messages m WHERE m.patient_id = p.id) AS message_count
-      FROM patients p
-      WHERE 1=1
-    `;
-    const params = [];
-    let paramIndex = 1;
-    if (search) {
-      query += ` AND (p.name ILIKE $${paramIndex} OR p.patient_id ILIKE $${paramIndex} OR p.email ILIKE $${paramIndex})`;
-      params.push(`%${search}%`);
-      paramIndex++;
-    }
-    if (status) {
-      query += ` AND p.claim_status = $${paramIndex}`;
-      params.push(status);
-      paramIndex++;
-    }
-    query += ` ORDER BY p.created_at DESC`;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-    query += ` LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
-    params.push(parseInt(limit), offset);
-
-    const countResult = await pool.query(
-      `SELECT COUNT(*) FROM patients p WHERE 1=1${search ? ` AND (p.name ILIKE $1 OR p.patient_id ILIKE $1 OR p.email ILIKE $1)` : ''}`,
-      search ? [`%${search}%`] : []
-    );
-
-    const result = await pool.query(query, params);
-    res.json({ patients: result.rows, total: parseInt(countResult.rows[0].count), page: parseInt(page), limit: parseInt(limit) });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
+const patientSchema = z.object({
+  patient_id: z.string().trim().min(1).max(50).regex(/^[A-Za-z0-9_-]+$/),
+  name: z.string().trim().min(1).max(255), phone: z.string().max(30).default(''),
+  email: z.union([z.string().email(), z.literal('')]).default(''),
+  dob: z.union([z.string().date(), z.literal('')]).optional(),
+  gender: z.string().max(30).default(''), policy_number: z.string().max(100).default(''),
+  insurer_name: z.string().max(255).default(''), notes: z.string().max(5000).default(''),
+  is_synthetic: z.boolean().default(true),
 });
-
-// GET /api/patients/:id
-router.get('/:id', authenticate, async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT p.*,
-        (SELECT COUNT(*) FROM documents d WHERE d.patient_id = p.id) AS doc_count,
-        (SELECT COUNT(*) FROM queries q WHERE q.patient_id = p.id) AS query_count
-       FROM patients p WHERE p.id = $1 OR p.patient_id = $1`,
-      [req.params.id]
-    );
-    if (!result.rows[0]) return res.status(404).json({ error: 'Patient not found' });
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
+router.use(authenticate);
+router.get('/', asyncRoute(async (req, res) => {
+  const input = parse(z.object({
+    search: z.string().max(200).default(''), status: z.string().max(50).default(''),
+    page: z.coerce.number().int().min(1).default(1), limit: z.coerce.number().int().min(1).max(100).default(20),
+  }), req.query);
+  const filter = scope(req.user);
+  const params = [...filter.params, `%${input.search}%`, input.status];
+  const s = filter.params.length + 1;
+  const where = `${filter.sql} AND (p.name ILIKE $${s} OR p.patient_id ILIKE $${s} OR p.email ILIKE $${s}) AND ($${s + 1}='' OR p.claim_status=$${s + 1})`;
+  const count = await pool.query(`SELECT COUNT(*)::int AS total FROM patients p WHERE ${where}`, params);
+  const result = await pool.query(
+    `SELECT p.*,(SELECT COUNT(*)::int FROM documents d WHERE d.patient_id=p.id) AS doc_count,
+     (SELECT COUNT(*)::int FROM queries q WHERE q.patient_id=p.id) AS query_count,
+     (SELECT COUNT(*)::int FROM messages m WHERE m.patient_id=p.id) AS message_count
+     FROM patients p WHERE ${where} ORDER BY p.created_at DESC LIMIT $${s + 2} OFFSET $${s + 3}`,
+    [...params, input.limit, (input.page - 1) * input.limit]
+  );
+  res.json({ patients: result.rows, total: count.rows[0].total, page: input.page, limit: input.limit });
+}));
+router.get('/:id', patientAccess, (req, res) => res.json(req.patient));
+router.post('/', roles('admin', 'staff'), asyncRoute(async (req, res) => {
+  const p = parse(patientSchema, req.body);
+  const { rows } = await pool.query(
+    `INSERT INTO patients(patient_id,name,phone,email,dob,gender,policy_number,insurer_name,notes,is_synthetic)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+    [p.patient_id, p.name, p.phone, p.email, p.dob || null, p.gender, p.policy_number, p.insurer_name, p.notes, p.is_synthetic]
+  );
+  if (req.user.role === 'staff') await pool.query('INSERT INTO patient_assignments VALUES($1,$2)', [rows[0].id, req.user.id]);
+  await audit(req.user.id, 'patient_created', rows[0].id);
+  res.status(201).json(rows[0]);
+}));
+router.patch('/:id', roles('admin', 'staff'), patientAccess, asyncRoute(async (req, res) => {
+  const input = parse(patientSchema.omit({ patient_id: true, is_synthetic: true }).partial().extend({
+    claim_status: z.enum(['pending', 'processing', 'awaiting_documents', 'completed']).optional(),
+  }), req.body);
+  const entries = Object.entries(input);
+  if (!entries.length) throw new HttpError(400, 'No changes supplied.');
+  const params = entries.map(([key, value]) => key === 'dob' ? value || null : value);
+  const { rows } = await pool.query(
+    `UPDATE patients SET ${entries.map(([key], i) => `${key}=$${i + 1}`).join(',')},updated_at=NOW() WHERE id=$${params.length + 1} RETURNING *`,
+    [...params, req.patient.id]
+  );
+  await audit(req.user.id, 'patient_updated', req.patient.id);
+  res.json(rows[0]);
+}));
+router.get('/:id/assignments', roles('admin'), patientAccess, asyncRoute(async (req, res) => {
+  res.json((await pool.query('SELECT user_id FROM patient_assignments WHERE patient_id=$1', [req.patient.id])).rows.map((r) => r.user_id));
+}));
+router.put('/:id/assignments', roles('admin'), patientAccess, asyncRoute(async (req, res) => {
+  const { user_ids } = parse(z.object({ user_ids: z.array(uuid).max(100) }), req.body);
+  if (user_ids.length) {
+    const valid = await pool.query("SELECT id FROM users WHERE id=ANY($1::uuid[]) AND role='staff' AND active=TRUE", [user_ids]);
+    if (valid.rows.length !== new Set(user_ids).size) throw new HttpError(400, 'Assignments must reference active staff.');
   }
-});
-
-// POST /api/patients
-router.post('/', authenticate, async (req, res) => {
-  try {
-    const { patient_id, name, phone, email, dob, gender, policy_number, insurer_name, notes } = req.body;
-    if (!patient_id || !name) return res.status(400).json({ error: 'patient_id and name required' });
-    const result = await pool.query(
-      `INSERT INTO patients (patient_id, name, phone, email, dob, gender, policy_number, insurer_name, notes)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [patient_id, name, phone, email, dob || null, gender, policy_number, insurer_name, notes]
-    );
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'Patient ID already exists' });
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// PATCH /api/patients/:id
-router.patch('/:id', authenticate, async (req, res) => {
-  try {
-    const { name, phone, email, dob, gender, policy_number, insurer_name, claim_status, notes } = req.body;
-    const result = await pool.query(
-      `UPDATE patients SET name=COALESCE($1,name), phone=COALESCE($2,phone), email=COALESCE($3,email),
-       dob=COALESCE($4,dob), gender=COALESCE($5,gender), policy_number=COALESCE($6,policy_number),
-       insurer_name=COALESCE($7,insurer_name), claim_status=COALESCE($8,claim_status), notes=COALESCE($9,notes),
-       updated_at=NOW() WHERE id=$10 RETURNING *`,
-      [name, phone, email, dob, gender, policy_number, insurer_name, claim_status, notes, req.params.id]
-    );
-    if (!result.rows[0]) return res.status(404).json({ error: 'Patient not found' });
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
+  await pool.transaction(async (db) => {
+    await db.query('DELETE FROM patient_assignments WHERE patient_id=$1', [req.patient.id]);
+    for (const id of new Set(user_ids)) await db.query('INSERT INTO patient_assignments(patient_id,user_id) VALUES($1,$2)', [req.patient.id, id]);
+  });
+  await audit(req.user.id, 'assignments_updated', req.patient.id);
+  res.json({ ok: true });
+}));
 module.exports = router;

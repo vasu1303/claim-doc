@@ -1,0 +1,15 @@
+Dear {patient_name},
+
+Your insurer has asked for more information about your claim (patient ID: {patient_id}).
+
+We checked the documents already in your locker. Here is what is needed:
+
+{required_items}
+
+Please sign in to your patient locker to submit the requested information:
+{portal_url}
+
+You do not need to resend documents that are already available. If you have questions, please contact our claims team.
+
+Thank you,
+Patient Locker Claims Team

@@ -1,0 +1,5 @@
+SYNTHETIC DEMO DOCUMENT - NOT A REAL PATIENT RECORD
+Hospital Bill
+Hospital: Example Demonstration Hospital
+Total: INR 10000
+This is a fictional final hospital bill created only for software testing.

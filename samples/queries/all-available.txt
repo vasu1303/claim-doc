@@ -1,0 +1,6 @@
+SYNTHETIC DEMO QUERY - NOT A REAL INSURER LETTER
+Dear Claims Team,
+1. Please provide the discharge summary.
+2. Please provide the policy copy.
+Regards,
+Synthetic Test Insurance

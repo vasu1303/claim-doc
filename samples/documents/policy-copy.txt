@@ -1,0 +1,5 @@
+SYNTHETIC DEMO DOCUMENT - NOT A REAL PATIENT RECORD
+Insurance Policy Copy
+Insurer: Synthetic Test Insurance
+Coverage period: 2026-01-01 to 2026-12-31.
+This is a fictional document created only for software testing.
